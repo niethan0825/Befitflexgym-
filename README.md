@@ -1,1 +1,271 @@
-# Befitflexgym-
+# Be Fit Flex Gym — Laguna · Management System
+
+A complete PHP + MySQL gym management system built on the `befitflex_gym`
+database, styled in the gym's red-on-black identity with a **liquid glass**
+interface — frosted translucent panels, specular edge highlights, and a slow
+drifting light field behind everything.
+
+## Two roles, one codebase
+
+| Role | Sees |
+|---|---|
+| **Admin** | Members, classes, payments, sessions, reservations, attendance, reports, activity log |
+| **Member** | Classes, payments, attendance, reservations, notifications, profile |
+
+## Install on XAMPP (5 minutes)
+
+1. Copy the `befitflex` folder into `C:\\xampp\\htdocs\\`
+2. Start **Apache** and **MySQL** in the XAMPP Control Panel
+3. Import the schema from `database/befitflex_gym.sql` either by opening
+   <http://localhost/phpmyadmin> → **Import** → choose the file → **Go**,
+   or by running:
+
+   ```powershell
+   php tools/rebuild-database.php
+   ```
+
+4. Open <http://localhost/befitflex/>
+
+5. Install the server dependency used for PDF invoices:
+
+  ```powershell
+  composer install
+  ```
+
+6. If upgrading an existing installation instead of importing the fresh schema,
+  import `database/upgrade.sql` once. It includes the remember-me token table,
+  day-pass/member link required for member day-pass QR codes, and other schema
+  upgrades.
+
+The login page's optional **Remember me on this device** setting keeps the
+account signed in for up to 30 days. Use it only on a trusted device; signing
+out revokes its remembered login.
+
+For announcement videos up to 1 GB, restart Apache from the XAMPP Control Panel
+after installation so PHP reloads the upload limits in `.user.ini`.
+
+There is no front-end build step.
+
+For the Railway Docker deployment and production environment setup, see
+[SETUP.md](SETUP.md#deploy-to-railway).
+
+## Email notifications
+
+Email delivery uses PHPMailer over SMTP. Configure Mailtrap Sandbox credentials
+from the Mailtrap inbox's SMTP settings; messages are captured in the sandbox
+instead of delivered to recipients. The application sends email for payments,
+reservations, account messages, bulk member messages, and admin announcements.
+In-app notifications continue to work if email is not configured.
+
+Set these variables in Windows PowerShell; do not put credentials in a PHP file:
+
+  ```powershell
+  [Environment]::SetEnvironmentVariable('MAIL_MAILER', 'smtp', 'User')
+  [Environment]::SetEnvironmentVariable('MAIL_HOST', 'sandbox.smtp.mailtrap.io', 'User')
+  [Environment]::SetEnvironmentVariable('MAIL_PORT', '2525', 'User')
+  [Environment]::SetEnvironmentVariable('MAIL_USERNAME', 'your_rotated_sandbox_username', 'User')
+  [Environment]::SetEnvironmentVariable('MAIL_PASSWORD', 'your_rotated_sandbox_password', 'User')
+  [Environment]::SetEnvironmentVariable('MAIL_ENCRYPTION', 'tls', 'User')
+  [Environment]::SetEnvironmentVariable('MAIL_FROM_ADDRESS', 'notifications@example.com', 'User')
+  [Environment]::SetEnvironmentVariable('MAIL_FROM_NAME', 'Be Fit Flex Gym', 'User')
+  [Environment]::SetEnvironmentVariable('MAIL_REPLY_TO', 'befitgymlaguna@gmail.com', 'User')
+  ```
+
+Replace the example username and password with the current credentials in your
+Mailtrap Sandbox inbox. Any credentials previously posted publicly should be
+rotated first. Fully exit and reopen the XAMPP Control Panel, then start Apache
+so it inherits the variables. Check `tools/health-check.php` for **Mailtrap SMTP:
+configured**, submit a test registration, and inspect the message in the
+Mailtrap Sandbox inbox.
+
+## Sign in
+
+| Role | Email | Password |
+|---|---|---|
+| Admin | admin@befitflexgym.com | admin123 |
+| Member | anna@example.com | member123 |
+
+Demo passwords are stored as plain text so you can sign in immediately. The
+first time each account logs in, the system silently re-saves the password as a
+bcrypt hash — so the database upgrades itself as people use it.
+
+## Add the logo
+
+Drop your two brand images here and every page picks them up automatically:
+
+- `assets/img/logo.png` — the red BF hexagon mark
+- `assets/img/banner.png` — the wide "BE FIT FLEX GYM - LAGUNA" banner
+
+If they are missing the interface falls back to a built-in SVG mark, so nothing
+breaks.
+
+## What is where
+
+```
+index.php            sign-in
+register.php         member self-enrollment (creates users + members rows)
+privacy.php          RA 10173 data privacy notice
+config/              database connection + app constants
+includes/            auth guard, helpers, header/sidebar/footer
+assets/css/glass.css the liquid-glass design system
+admin/               management screens
+member/              member dashboard and account screens
+api/                 check-in, notification read/clear endpoints
+database/            the SQL file to import
+docs/                walkthrough, screen map, theme notes
+```
+
+## Notes on the build
+
+- Every query is a prepared statement. No string-concatenated SQL anywhere.
+- Every form carries a CSRF token; every POST verifies it.
+- Every printed value passes through `e()` (htmlspecialchars).
+- IDs follow the schema's own format — `MEM0005`, `WP00001`, `PAY00006` —
+  generated by reading the current maximum and incrementing.
+- Deleting a member cascades exactly as the foreign keys declare; the UI warns
+  before it happens.
+- New member accounts require email verification before sign-in. Existing seeded
+  demo accounts are marked verified in the schema.
+- Members can download a server-generated PDF invoice from their payment history.
+- Administrators can download a consistent MySQL snapshot from the dashboard.
+- Reservation creation uses a transaction and row locking to reduce concurrent
+  double-booking.
+- `composer smoke` checks the live database schema, PDO configuration, webhook
+  guard, and PDF dependency; `composer health` reports runtime and integration
+  configuration.
+- Member contact numbers are stored as AES-256-GCM ciphertext using
+  `BEFITFLEX_ENCRYPTION_KEY`; the key is never stored in the repository.
+
+### Implementation boundaries
+
+The Maya Checkout integration uses the sandbox by default. Members can start
+hosted checkout from their payment history when both Maya API keys are configured
+and PHP cURL is enabled. On return, the app retrieves the checkout from Maya and marks it paid
+only when the server confirms its successful status, payment reference, amount,
+currency, and saved checkout ID. A signed webhook can confirm a payment only
+when its checkout ID, payment reference, amount, and currency also match the
+local pending payment.
+Administrators can still record non-Maya payments manually, but Maya-linked
+payments cannot be manually marked Paid. When a checkout ID is saved, the payment
+page offers a retry action; it first checks the existing checkout with Maya and
+starts a new one only after Maya confirms failure, cancellation, or expiry.
+Available payment methods depend on the Maya merchant account.
+
+Members can scan the reusable day-pass QR on their member card, and admins can
+print the same QR from **Admin → Day Passes**. Visitors can enter only their
+name, choose a date and rate, then select cash at the front desk or Maya. Cash
+passes remain pending until staff confirm receipt; Maya passes become active
+only after server-side checkout verification. Signed-in active, paid monthly
+members are directed to use their member card instead of buying a day pass.
+Existing deployments must run `database/upgrade.sql` to add the day-pass token
+and Maya checkout columns.
+
+To test online payments:
+
+1. Obtain Maya Checkout public and secret API keys from the Maya Business
+   Manager (or use the published sandbox keys) and configure `MAYA_PUBLIC_KEY`
+   and `MAYA_SECRET_KEY` as environment variables for the PHP/Apache process.
+   Configure `MAYA_WEBHOOK_SECRET` too if you will receive webhook notifications.
+   Do not put credentials in source files.
+2. Make the application reachable over HTTPS (for local testing, use a trusted
+   tunnel) and set `BEFITFLEX_APP_URL` to its public base URL, including the app
+   path if applicable (for example, `https://your-public-host/befitflex`). Set
+   Maya's payment notification URL to
+   `https://your-public-host/befitflex/api/maya-webhook.php`.
+3. Ensure GCash is enabled for the sandbox merchant account. The hosted checkout
+   displays the payment methods enabled for that account; this integration does
+   not force GCash or guarantee it is available in every sandbox account.
+4. Fully exit and reopen the XAMPP Control Panel, then start Apache so it
+   inherits the configured environment variables. Check `php tools/health-check.php`
+   for Maya configuration, then use **Pay online with Maya** on a pending member
+   payment and complete a sandbox transaction. The return page checks the
+   transaction directly with Maya; webhooks additionally require a configured
+   signed notification endpoint.
+
+Maya's direct status lookup requires the checkout ID, so payments created
+before the app saved it cannot be checked from the return page and the app will
+not guess an ID from a payment reference or trust a browser redirect. A complete,
+validly signed webhook can still match and save a previously missing ID when it
+includes the successful status, checkout ID, payment reference, amount, and
+currency. On localhost Maya cannot deliver that webhook; if no such verified
+event is received, staff can enter the checkout ID from the receipt or Maya
+merchant dashboard using **Verify existing Maya checkout** on the admin payment
+row. The server queries Maya and links it only if the checkout ID, payment
+reference, amount, and currency match; it marks the payment Paid only if Maya
+also reports `PAYMENT_SUCCESS`. A receipt or merchant-dashboard review alone does
+not change the app's payment status. If no checkout ID can be recovered, leave
+the payment pending and do not ask the member to pay again until the charge is
+resolved.
+
+The default checkout endpoint is Maya's sandbox. `MAYA_CHECKOUT_URL` can override
+it when needed; use Maya's production endpoint and production credentials only
+when deliberately moving to live payments. Maya Checkout remains subject to
+merchant approval and enabled payment methods.
+
+AES-256 still requires a production key-management policy and a tested data
+migration before it can be enabled safely.
+
+
+## Analytics
+
+A full analytics layer ships with the system — eleven metric sets across three
+screens, all computed from live records with no external service.
+
+| Screen | Covers |
+|---|---|
+| **Admin → Analytics** | Recurring revenue, twelve-month trend with a three-month projection, cohort retention grid, churn-risk board, peak-hours heatmap and class fill rates |
+
+Everything exports to CSV, including a ready-to-dial call list of at-risk members.
+
+Charts are server-rendered inline SVG — no charting library, no bundle to load,
+and they survive printing.
+
+### AI operating insights
+
+Admin Analytics includes explainable, privacy-preserving AI-style decision support
+computed from local records. It prioritizes member churn follow-ups, outstanding
+payments and underfilled classes. It does not send names,
+emails, contact numbers, or other member records to an external model, and it never
+changes records automatically. Staff can open the underlying screen and review the
+reasons before taking action.
+
+### Performance pass
+
+Import `database/optimize.sql` after the main schema. It adds fifteen composite
+indexes chosen from the queries that actually run, plus three reporting views.
+Safe to run more than once.
+
+On the application side: the dashboard's eight COUNT queries collapsed into one,
+prepared statements are reused within a request, metric sets are cached with short
+TTLs and invalidated by any audited write, responses are gzipped, and CSS/JS are
+versioned by file modification time.
+
+Details in `docs/analytics.md`.
+
+
+## Interface
+
+**Ctrl+K** opens a command palette that searches members, classes and
+payments and doubles as a command list. Keyboard shortcuts cover the frequent
+actions — `/` to filter, `n` to add, `g`+letter to navigate, `?` for the list.
+
+Every table sorts, filters and paginates itself. Members support bulk status
+changes and group messaging. There is a light theme and a
+compact row density, both remembered per browser and applied before first paint.
+
+On a phone, tables stack into labelled cards, modals become bottom sheets, and a
+bottom tab bar carries the four destinations each role uses most.
+
+Accessibility: skip link, visible focus rings, focus trapped and restored in
+dialogs, live regions on toasts, keyboard-operable table sorting, and
+`prefers-reduced-motion` honoured throughout.
+
+### Additional screens
+
+| Screen | Purpose |
+|---|---|
+| `kiosk.php` | Full-screen check-in station for a tablet at the entrance. Keypad or barcode; one number toggles in or out. |
+| `admin/announcements.php` | Broadcast to a queried audience — all members, active only, anyone with a balance, anyone not seen in three weeks. Shows open rates. |
+| `member/id-card.php` | Printable member card with a copyable member number. |
+
+Details in `docs/ui-ux.md`.
