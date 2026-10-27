@@ -1,95 +1,60 @@
 <?php
 declare(strict_types=1);
 
-function turnstile_site_key(): string
+require __DIR__ . '/../includes/turnstile.php';
+
+function check_turnstile_test(string $name, bool $passed): void
 {
-    $siteKey = getenv('TURNSTILE_SITE_KEY');
-    return is_string($siteKey) ? trim($siteKey) : '';
+    if (!$passed) {
+        throw new RuntimeException('Failed: ' . $name);
+    }
+    echo 'PASS  ' . $name . PHP_EOL;
 }
 
-function turnstile_is_configured(): bool
-{
-    $secretKey = getenv('TURNSTILE_SECRET_KEY');
-    return turnstile_site_key() !== ''
-        && is_string($secretKey)
-        && trim($secretKey) !== ''
-        && function_exists('curl_init')
-        && turnstile_expected_hostname() !== null;
-}
+$validResponse = [
+    'success' => true,
+    'hostname' => 'gym.example.com',
+    'action' => 'register',
+];
 
-function turnstile_response_is_valid(array $response, string $expectedAction, string $expectedHostname): bool
-{
-    $hostname = $response['hostname'] ?? null;
-    $action = $response['action'] ?? null;
-    return ($response['success'] ?? false) === true
-        && is_string($hostname)
-        && strcasecmp(rtrim($hostname, '.'), rtrim($expectedHostname, '.')) === 0
-        && is_string($action)
-        && hash_equals($expectedAction, $action);
-}
+check_turnstile_test(
+    'accepts successful verification for the expected action and hostname',
+    turnstile_response_is_valid($validResponse, 'register', 'gym.example.com')
+);
+check_turnstile_test(
+    'hostname comparison is case-insensitive and ignores a trailing dot',
+    turnstile_response_is_valid(array_replace($validResponse, ['hostname' => 'GYM.EXAMPLE.COM.']), 'register', 'gym.example.com')
+);
+check_turnstile_test(
+    'rejects an unsuccessful verification',
+    !turnstile_response_is_valid(array_replace($validResponse, ['success' => false]), 'register', 'gym.example.com')
+);
+check_turnstile_test(
+    'rejects a token issued for another form action',
+    !turnstile_response_is_valid($validResponse, 'login', 'gym.example.com')
+);
+check_turnstile_test(
+    'rejects a token issued for another hostname',
+    !turnstile_response_is_valid(array_replace($validResponse, ['hostname' => 'other.example.com']), 'register', 'gym.example.com')
+);
+check_turnstile_test(
+    'rejects missing action or hostname fields',
+    !turnstile_response_is_valid(['success' => true], 'register', 'gym.example.com')
+);
 
-function turnstile_expected_hostname(): ?string
-{
-    $appUrl = getenv('BEFITFLEX_APP_URL');
-    if (is_string($appUrl) && trim($appUrl) !== '') {
-        $url = trim($appUrl);
-        $host = filter_var($url, FILTER_VALIDATE_URL) !== false
-            && strtolower((string) parse_url($url, PHP_URL_SCHEME)) === 'https'
-            ? parse_url($url, PHP_URL_HOST)
-            : false;
-    } else {
-        $requestHost = $_SERVER['HTTP_HOST'] ?? '';
-        $host = is_string($requestHost) && $requestHost !== ''
-            ? parse_url('https://' . $requestHost, PHP_URL_HOST)
-            : false;
-    }
-
-    return is_string($host) && $host !== '' ? strtolower(rtrim($host, '.')) : null;
-}
-
-function turnstile_verify_token(string $token, string $expectedAction): bool
-{
-    if (!turnstile_is_configured()) {
-        error_log('Turnstile verification is not configured: set both Turnstile keys, enable PHP cURL, and provide a valid HTTPS BEFITFLEX_APP_URL or request host.');
-        return false;
-    }
-    if ($token === '' || strlen($token) > 2048) {
-        return false;
-    }
-
-    $hostname = (string) turnstile_expected_hostname();
-
-    $secretKey = trim((string) getenv('TURNSTILE_SECRET_KEY'));
-    $curl = curl_init('https://challenges.cloudflare.com/turnstile/v0/siteverify');
-    if ($curl === false || !curl_setopt_array($curl, [
-        CURLOPT_POST => true,
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_POSTFIELDS => http_build_query([
-            'secret' => $secretKey,
-            'response' => $token,
-        ]),
-        CURLOPT_HTTPHEADER => ['Content-Type: application/x-www-form-urlencoded'],
-        CURLOPT_TIMEOUT => 10,
-        CURLOPT_CONNECTTIMEOUT => 5,
-    ])) {
-        if ($curl !== false) {
-            curl_close($curl);
-        }
-        error_log('Turnstile verification request could not be initialized.');
-        return false;
-    }
-
-    $body = curl_exec($curl);
-    $status = (int) curl_getinfo($curl, CURLINFO_HTTP_CODE);
-    $curlError = curl_errno($curl);
-    curl_close($curl);
-
-    if ($body === false || $status < 200 || $status >= 300) {
-        error_log('Turnstile verification request failed: cURL ' . $curlError . ', HTTP ' . $status);
-        return false;
-    }
-
-    $response = json_decode($body, true);
-    return is_array($response)
-        && turnstile_response_is_valid($response, $expectedAction, $hostname);
-}
+putenv('BEFITFLEX_APP_URL=https://gym.example.com/');
+check_turnstile_test(
+    'uses the configured HTTPS application hostname',
+    turnstile_expected_hostname() === 'gym.example.com'
+);
+putenv('BEFITFLEX_APP_URL=http://gym.example.com');
+check_turnstile_test(
+    'rejects a non-HTTPS configured application URL',
+    turnstile_expected_hostname() === null
+);
+putenv('BEFITFLEX_APP_URL');
+$_SERVER['HTTP_HOST'] = 'localhost:8080';
+check_turnstile_test(
+    'supports a local development hostname when no app URL is configured',
+    turnstile_expected_hostname() === 'localhost'
+);

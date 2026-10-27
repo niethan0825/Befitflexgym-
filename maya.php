@@ -1,288 +1,226 @@
 <?php
 declare(strict_types=1);
 
-function maya_configured(): bool
+require __DIR__ . '/../config/config.php';
+require __DIR__ . '/../includes/maya.php';
+
+function check_maya_test(string $name, bool $passed): void
 {
-    $publicKey = getenv('MAYA_PUBLIC_KEY');
-    return is_string($publicKey) && trim($publicKey) !== '';
+    if (!$passed) {
+        throw new RuntimeException('Failed: ' . $name);
+    }
+    echo 'PASS  ' . $name . PHP_EOL;
 }
 
-function maya_payment_flow_configured(): bool
-{
-    $secretKey = getenv('MAYA_SECRET_KEY');
-    return maya_configured()
-        && is_string($secretKey)
-        && trim($secretKey) !== ''
-        && function_exists('curl_init');
+$payment = [
+    'payment_id' => 'PAY00001',
+    'amount' => '995.00',
+    'maya_checkout_id' => 'checkout-123',
+];
+$checkout = [
+    'checkoutId' => 'checkout-123',
+    'paymentStatus' => 'PAYMENT_SUCCESS',
+    'requestReferenceNumber' => 'PAY00001',
+    'totalAmount' => ['value' => 995, 'currency' => 'PHP'],
+];
+
+check_maya_test('successful checkout must match reference, amount, currency, and saved ID', maya_checkout_confirms_payment($checkout, $payment, 'checkout-123'));
+check_maya_test('checkout fetched using saved ID may omit its ID in the response body', maya_checkout_confirms_payment([
+    'paymentStatus' => 'PAYMENT_SUCCESS',
+    'requestReferenceNumber' => 'PAY00001',
+    'totalAmount' => ['value' => 995, 'currency' => 'PHP'],
+], $payment, 'checkout-123'));
+check_maya_test('Maya API totalAmount.amount verifies against local invoice amount', maya_checkout_confirms_payment([
+    'checkoutId' => 'checkout-123',
+    'paymentStatus' => 'PAYMENT_SUCCESS',
+    'requestReferenceNumber' => 'PAY00001',
+    'totalAmount' => ['amount' => 995, 'currency' => 'PHP'],
+], $payment, 'checkout-123'));
+check_maya_test('conflicting totalAmount value and amount cannot confirm payment', !maya_checkout_confirms_payment([
+    'checkoutId' => 'checkout-123',
+    'paymentStatus' => 'PAYMENT_SUCCESS',
+    'requestReferenceNumber' => 'PAY00001',
+    'totalAmount' => ['value' => 995, 'amount' => 996, 'currency' => 'PHP'],
+], $payment, 'checkout-123'));
+check_maya_test('pending old checkout may be safely linked when server response details match', maya_checkout_matches_payment([
+    'checkoutId' => 'checkout-old',
+    'paymentStatus' => 'PENDING',
+    'requestReferenceNumber' => 'PAY00001',
+    'totalAmount' => ['value' => 995, 'currency' => 'PHP'],
+], ['payment_id' => 'PAY00001', 'amount' => '995.00'], 'checkout-old'));
+foreach (['PAYMENT_FAILED', 'PAYMENT_CANCELLED', 'PAYMENT_EXPIRED'] as $failedStatus) {
+    check_maya_test($failedStatus . ' permits retry only for the matched checkout', maya_checkout_is_retryable_failure([
+        'checkoutId' => 'checkout-123',
+        'paymentStatus' => $failedStatus,
+        'requestReferenceNumber' => 'PAY00001',
+        'totalAmount' => ['value' => 995, 'currency' => 'PHP'],
+    ], $payment, 'checkout-123'));
+}
+foreach (['FAILED', 'CANCELLED', 'EXPIRED'] as $failedStatus) {
+    check_maya_test($failedStatus . ' terminal checkout status permits retry', maya_checkout_is_retryable_failure([
+        'checkoutId' => 'checkout-123',
+        'status' => $failedStatus,
+    ], $payment, 'checkout-123'));
+}
+check_maya_test('failed checkout using status field permits retry when Maya omits payment details', maya_checkout_is_retryable_failure([
+    'checkoutId' => 'checkout-123',
+    'status' => 'PAYMENT_FAILED',
+], $payment, 'checkout-123'));
+check_maya_test('retry rejects a present conflicting reference even if status is failed', !maya_checkout_is_retryable_failure([
+    'checkoutId' => 'checkout-123',
+    'status' => 'PAYMENT_FAILED',
+    'requestReferenceNumber' => 'OTHER',
+], $payment, 'checkout-123'));
+check_maya_test('retry rejects a present conflicting amount even if status is failed', !maya_checkout_is_retryable_failure([
+    'checkoutId' => 'checkout-123',
+    'status' => 'PAYMENT_FAILED',
+    'totalAmount' => ['value' => 994, 'currency' => 'PHP'],
+], $payment, 'checkout-123'));
+check_maya_test('retry validates Maya totalAmount.amount when returned', !maya_checkout_is_retryable_failure([
+    'checkoutId' => 'checkout-123',
+    'status' => 'PAYMENT_FAILED',
+    'totalAmount' => ['amount' => 994, 'currency' => 'PHP'],
+], $payment, 'checkout-123'));
+check_maya_test('pending checkout does not permit another checkout', !maya_checkout_is_retryable_failure(array_replace($checkout, [
+    'paymentStatus' => 'PENDING',
+]), $payment, 'checkout-123'));
+check_maya_test('successful checkout does not permit another checkout', !maya_checkout_is_retryable_failure($checkout, $payment, 'checkout-123'));
+check_maya_test('retry is blocked for a mismatched checkout', !maya_checkout_is_retryable_failure(array_replace($checkout, [
+    'paymentStatus' => 'PAYMENT_FAILED',
+    'requestReferenceNumber' => 'OTHER',
+]), $payment, 'checkout-123'));
+check_maya_test('old checkout with wrong reference cannot be linked', !maya_checkout_matches_payment([
+    'checkoutId' => 'checkout-old',
+    'paymentStatus' => 'PENDING',
+    'requestReferenceNumber' => 'OTHER',
+    'totalAmount' => ['value' => 995, 'currency' => 'PHP'],
+], ['payment_id' => 'PAY00001', 'amount' => '995.00'], 'checkout-old'));
+check_maya_test('old checkout with wrong amount cannot be linked', !maya_checkout_matches_payment([
+    'checkoutId' => 'checkout-old',
+    'paymentStatus' => 'PENDING',
+    'requestReferenceNumber' => 'PAY00001',
+    'totalAmount' => ['value' => 994, 'currency' => 'PHP'],
+], ['payment_id' => 'PAY00001', 'amount' => '995.00'], 'checkout-old'));
+check_maya_test('old checkout with wrong currency cannot be linked', !maya_checkout_matches_payment([
+    'checkoutId' => 'checkout-old',
+    'paymentStatus' => 'PENDING',
+    'requestReferenceNumber' => 'PAY00001',
+    'totalAmount' => ['value' => 995, 'currency' => 'USD'],
+], ['payment_id' => 'PAY00001', 'amount' => '995.00'], 'checkout-old'));
+check_maya_test('old checkout with conflicting response ID cannot be linked', !maya_checkout_matches_payment([
+    'checkoutId' => 'different-checkout',
+    'paymentStatus' => 'PENDING',
+    'requestReferenceNumber' => 'PAY00001',
+    'totalAmount' => ['value' => 995, 'currency' => 'PHP'],
+], ['payment_id' => 'PAY00001', 'amount' => '995.00'], 'checkout-old'));
+check_maya_test('checkout mismatch identifies missing payment reference without returning payment data',
+    maya_checkout_payment_mismatch([
+        'checkoutId' => 'checkout-old',
+        'paymentStatus' => 'PAYMENT_FAILED',
+        'totalAmount' => ['value' => 995, 'currency' => 'PHP'],
+    ], ['payment_id' => 'PAY00001', 'amount' => '995.00'], 'checkout-old') === 'payment reference');
+check_maya_test('checkout mismatch identifies amount separately',
+    maya_checkout_payment_mismatch([
+        'checkoutId' => 'checkout-old',
+        'paymentStatus' => 'PAYMENT_FAILED',
+        'requestReferenceNumber' => 'PAY00001',
+        'totalAmount' => ['value' => 995.01, 'currency' => 'PHP'],
+    ], ['payment_id' => 'PAY00001', 'amount' => '995.00'], 'checkout-old') === 'amount');
+check_maya_test('generic response id is not mistaken for the checkout ID', maya_checkout_confirms_payment([
+    'id' => 'payment-transaction-456',
+    'paymentStatus' => 'PAYMENT_SUCCESS',
+    'requestReferenceNumber' => 'PAY00001',
+    'totalAmount' => ['value' => 995, 'currency' => 'PHP'],
+], $payment, 'checkout-123'));
+check_maya_test('explicitly conflicting checkout ID is rejected', !maya_checkout_confirms_payment(array_replace($checkout, ['checkoutId' => 'checkout-other']), $payment, 'checkout-123'));
+check_maya_test('different requested checkout ID is rejected', !maya_checkout_confirms_payment($checkout, $payment, 'checkout-other'));
+check_maya_test('wrong payment reference is rejected', !maya_checkout_confirms_payment(array_replace($checkout, ['requestReferenceNumber' => 'OTHER']), $payment, 'checkout-123'));
+check_maya_test('wrong amount is rejected', !maya_checkout_confirms_payment([
+    'checkoutId' => 'checkout-123',
+    'paymentStatus' => 'PAYMENT_SUCCESS',
+    'requestReferenceNumber' => 'PAY00001',
+    'totalAmount' => ['value' => 995.01, 'currency' => 'PHP'],
+], $payment, 'checkout-123'));
+check_maya_test('wrong currency is rejected', !maya_checkout_confirms_payment([
+    'checkoutId' => 'checkout-123',
+    'paymentStatus' => 'PAYMENT_SUCCESS',
+    'requestReferenceNumber' => 'PAY00001',
+    'totalAmount' => ['value' => 995, 'currency' => 'USD'],
+], $payment, 'checkout-123'));
+check_maya_test('missing saved checkout ID is rejected', !maya_checkout_confirms_payment($checkout, [
+    'payment_id' => 'PAY00001',
+    'amount' => '995.00',
+], 'checkout-123'));
+check_maya_test('extra zero decimal places preserve the exact cent amount', maya_amount_in_cents('995.0000') === 99500);
+check_maya_test('non-zero fractional-cent amounts are rejected', maya_amount_in_cents('995.001') === null);
+
+$event = [
+    'id' => 'checkout-123',
+    'status' => 'PAYMENT_SUCCESS',
+    'requestReferenceNumber' => 'PAY00001',
+    'totalAmount' => ['value' => 995, 'currency' => 'PHP'],
+];
+check_maya_test('signed webhook details must match saved checkout', maya_webhook_confirms_payment($event, $payment));
+check_maya_test('webhook with another checkout ID is rejected', !maya_webhook_confirms_payment(array_replace($event, ['id' => 'checkout-other']), $payment));
+check_maya_test('complete signed webhook can safely recover an unsaved checkout ID', maya_webhook_confirms_payment($event, [
+    'payment_id' => 'PAY00001',
+    'amount' => '995.00',
+]));
+check_maya_test('webhook without amount and currency is rejected', !maya_webhook_confirms_payment([
+    'id' => 'checkout-123',
+    'status' => 'PAYMENT_SUCCESS',
+    'requestReferenceNumber' => 'PAY00001',
+], $payment));
+check_maya_test('webhook success label without PAYMENT_SUCCESS is rejected', !maya_webhook_confirms_payment([
+    'id' => 'checkout-123',
+    'status' => 'COMPLETED',
+    'requestReferenceNumber' => 'PAY00001',
+    'totalAmount' => ['value' => 995, 'currency' => 'PHP'],
+], $payment));
+check_maya_test('manual admin payment is allowed for a pending cash payment', maya_manual_mark_allowed([
+    'payment_status' => 'Pending',
+    'payment_method' => 'Cash',
+    'maya_checkout_id' => null,
+]));
+check_maya_test('Maya cannot be manually created as paid', !maya_manual_payment_creation_allowed('Maya', 'Paid'));
+check_maya_test('pending Maya payment may be created for server verification', maya_manual_payment_creation_allowed('Maya', 'Pending'));
+check_maya_test('manual admin payment is blocked for a Maya checkout', !maya_manual_mark_allowed([
+    'payment_status' => 'Pending',
+    'payment_method' => 'Cash',
+    'maya_checkout_id' => 'checkout-123',
+]));
+check_maya_test('manual admin payment is blocked for Maya method without a saved ID', !maya_manual_mark_allowed([
+    'payment_status' => 'Pending',
+    'payment_method' => 'Maya',
+    'maya_checkout_id' => null,
+]));
+
+$previousPublicKey = getenv('MAYA_PUBLIC_KEY');
+$previousSecretKey = getenv('MAYA_SECRET_KEY');
+putenv('MAYA_PUBLIC_KEY');
+putenv('MAYA_SECRET_KEY');
+check_maya_test('Maya checkout flow requires both API keys and cURL', !maya_payment_flow_configured());
+$unconfiguredCheckout = maya_create_checkout($payment, 'https://merchant.example/return', 'https://merchant.example/failure');
+check_maya_test('unconfigured Maya checkout fails before contacting Maya', !$unconfiguredCheckout['ok']);
+if ($previousPublicKey === false) {
+    putenv('MAYA_PUBLIC_KEY');
+} else {
+    putenv('MAYA_PUBLIC_KEY=' . $previousPublicKey);
+}
+if ($previousSecretKey === false) {
+    putenv('MAYA_SECRET_KEY');
+} else {
+    putenv('MAYA_SECRET_KEY=' . $previousSecretKey);
 }
 
-function maya_manual_payment_creation_allowed(string $method, string $status): bool
-{
-    return $method !== 'Maya' || $status !== 'Paid';
-}
-
-function maya_create_checkout(array $payment, string $successUrl, string $failureUrl): array
-{
-    $publicKey = getenv('MAYA_PUBLIC_KEY');
-    $endpoint = getenv('MAYA_CHECKOUT_URL') ?: MAYA_CHECKOUT_URL;
-    if (!maya_payment_flow_configured() || !is_string($publicKey)) {
-        return ['ok' => false, 'error' => 'Maya checkout requires public and secret API keys and PHP cURL so payment status can be verified.'];
-    }
-    $publicKey = trim($publicKey);
-
-    $buyer = [
-        'firstName' => (string) ($payment['member_name'] ?? $payment['visitor_name'] ?? 'Member'),
-    ];
-    $email = trim((string) ($payment['email'] ?? ''));
-    if ($email !== '') {
-        $buyer['contact'] = ['email' => $email];
-    }
-    $payload = json_encode([
-        'totalAmount' => ['value' => (float) $payment['amount'], 'currency' => 'PHP'],
-        'buyer' => $buyer,
-        'items' => [['name' => (string) ($payment['notes'] ?: 'Gym membership payment'), 'amount' => ['value' => (float) $payment['amount'], 'currency' => 'PHP'], 'totalAmount' => ['value' => (float) $payment['amount'], 'currency' => 'PHP']]],
-        'redirectUrl' => ['success' => $successUrl, 'failure' => $failureUrl, 'cancel' => $failureUrl],
-        'requestReferenceNumber' => (string) $payment['payment_id'],
-    ], JSON_THROW_ON_ERROR);
-
-    $curl = curl_init($endpoint);
-    if ($curl === false || !curl_setopt_array($curl, [
-        CURLOPT_POST => true,
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_USERPWD => $publicKey . ':',
-        CURLOPT_HTTPAUTH => CURLAUTH_BASIC,
-        CURLOPT_HTTPHEADER => ['Content-Type: application/json', 'Accept: application/json'],
-        CURLOPT_POSTFIELDS => $payload,
-        CURLOPT_TIMEOUT => 20,
-    ])) {
-        if ($curl !== false) {
-            curl_close($curl);
-        }
-        error_log('Maya checkout request could not be initialized.');
-        return ['ok' => false, 'error' => 'Maya checkout could not be started. Please try again later.'];
-    }
-    $body = curl_exec($curl);
-    $status = curl_getinfo($curl, CURLINFO_HTTP_CODE);
-    $curlError = curl_errno($curl);
-    curl_close($curl);
-    $data = json_decode((string) $body, true);
-
-    if ($body === false || $status < 200 || $status >= 300 || !is_array($data)) {
-        error_log('Maya checkout failed: cURL ' . $curlError . ', HTTP ' . $status);
-        return ['ok' => false, 'error' => 'Payment service unavailable.'];
-    }
-    return ['ok' => true, 'data' => $data];
-}
-
-function maya_get_checkout(string $checkoutId): array
-{
-    $secret = getenv('MAYA_SECRET_KEY');
-    $endpoint = getenv('MAYA_CHECKOUT_URL') ?: MAYA_CHECKOUT_URL;
-    if (!is_string($secret) || trim($secret) === '' || !function_exists('curl_init')) {
-        return ['ok' => false, 'error' => 'Maya status verification is not configured.'];
-    }
-    $secret = trim($secret);
-
-    $curl = curl_init(rtrim($endpoint, '/') . '/' . rawurlencode($checkoutId));
-    if ($curl === false || !curl_setopt_array($curl, [
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_USERPWD => $secret . ':',
-        CURLOPT_HTTPAUTH => CURLAUTH_BASIC,
-        CURLOPT_HTTPHEADER => ['Accept: application/json'],
-        CURLOPT_TIMEOUT => 20,
-    ])) {
-        if ($curl !== false) {
-            curl_close($curl);
-        }
-        error_log('Maya status lookup request could not be initialized.');
-        return ['ok' => false, 'error' => 'Maya could not verify this payment right now.'];
-    }
-    $body = curl_exec($curl);
-    $status = curl_getinfo($curl, CURLINFO_HTTP_CODE);
-    $curlError = curl_errno($curl);
-    curl_close($curl);
-    $data = json_decode((string) $body, true);
-
-    if ($body === false || $status < 200 || $status >= 300 || !is_array($data)) {
-        error_log('Maya status lookup failed: cURL ' . $curlError . ', HTTP ' . $status);
-        return ['ok' => false, 'error' => 'Maya could not verify this payment right now.'];
-    }
-    return ['ok' => true, 'data' => $data];
-}
-
-function maya_checkout_confirms_payment(array $checkout, array $payment, string $requestedCheckoutId): bool
-{
-    return maya_checkout_id_matches($checkout, $payment, $requestedCheckoutId)
-        && maya_checkout_matches_payment($checkout, $payment, $requestedCheckoutId)
-        && maya_checkout_status($checkout) === 'PAYMENT_SUCCESS';
-}
-
-function maya_checkout_matches_payment(array $checkout, array $payment, string $requestedCheckoutId): bool
-{
-    return maya_checkout_payment_mismatch($checkout, $payment, $requestedCheckoutId) === null;
-}
-
-function maya_checkout_payment_mismatch(array $checkout, array $payment, string $requestedCheckoutId): ?string
-{
-    if ($requestedCheckoutId === '') {
-        return 'checkout reference';
-    }
-    if (isset($checkout['checkoutId']) && (
-        !is_string($checkout['checkoutId'])
-        || !hash_equals($requestedCheckoutId, $checkout['checkoutId'])
-    )) {
-        return 'checkout reference';
-    }
-    if ((string) ($checkout['requestReferenceNumber'] ?? '') !== (string) ($payment['payment_id'] ?? '')) {
-        return 'payment reference';
-    }
-
-    $checkoutAmountCents = maya_checkout_amount_in_cents($checkout);
-    if ($checkoutAmountCents === null
-        || $checkoutAmountCents !== maya_amount_in_cents($payment['amount'] ?? null)) {
-        return 'amount';
-    }
-    if (strtoupper((string) ($checkout['totalAmount']['currency'] ?? '')) !== 'PHP') {
-        return 'currency';
-    }
-    return null;
-}
-
-function maya_checkout_is_retryable_failure(array $checkout, array $payment, string $requestedCheckoutId): bool
-{
-    if (!maya_checkout_id_matches($checkout, $payment, $requestedCheckoutId)
-        || !in_array(maya_checkout_status($checkout), [
-            'FAILED',
-            'CANCELLED',
-            'EXPIRED',
-            'PAYMENT_FAILED',
-            'PAYMENT_CANCELLED',
-            'PAYMENT_EXPIRED',
-        ], true)) {
-        return false;
-    }
-
-    if (array_key_exists('requestReferenceNumber', $checkout)
-        && (string) $checkout['requestReferenceNumber'] !== (string) ($payment['payment_id'] ?? '')) {
-        return false;
-    }
-
-    if (array_key_exists('totalAmount', $checkout)) {
-        if (!is_array($checkout['totalAmount'])) {
-            return false;
-        }
-        $hasAmount = array_key_exists('value', $checkout['totalAmount'])
-            || array_key_exists('amount', $checkout['totalAmount']);
-        if ($hasAmount
-            && maya_checkout_amount_in_cents($checkout) !== maya_amount_in_cents($payment['amount'] ?? null)) {
-            return false;
-        }
-        if (array_key_exists('currency', $checkout['totalAmount'])
-            && strtoupper((string) $checkout['totalAmount']['currency']) !== 'PHP') {
-            return false;
-        }
-    }
-
-    return true;
-}
-
-function maya_checkout_status(array $checkout): ?string
-{
-    $status = $checkout['paymentStatus'] ?? $checkout['status'] ?? null;
-    return is_string($status) ? strtoupper($status) : null;
-}
-
-function maya_checkout_amount_in_cents(array $checkout): ?int
-{
-    $totalAmount = $checkout['totalAmount'] ?? null;
-    if (!is_array($totalAmount)) {
-        return null;
-    }
-
-    $values = [];
-    foreach (['value', 'amount'] as $key) {
-        if (!array_key_exists($key, $totalAmount)) {
-            continue;
-        }
-        $cents = maya_amount_in_cents($totalAmount[$key]);
-        if ($cents === null) {
-            return null;
-        }
-        $values[] = $cents;
-    }
-
-    if ($values === []) {
-        return null;
-    }
-    if (count(array_unique($values)) !== 1) {
-        return null;
-    }
-
-    return $values[0];
-}
-
-function maya_webhook_confirms_payment(array $event, array $payment): bool
-{
-    $checkoutId = $event['checkoutId'] ?? $event['id'] ?? null;
-    $status = strtoupper((string) ($event['paymentStatus'] ?? $event['status'] ?? ''));
-    if (!is_string($checkoutId) || $status !== 'PAYMENT_SUCCESS') {
-        return false;
-    }
-
-    $savedCheckoutId = (string) ($payment['maya_checkout_id'] ?? '');
-    return ($savedCheckoutId === '' || hash_equals($savedCheckoutId, $checkoutId))
-        && maya_checkout_matches_payment([
-            'paymentStatus' => $status,
-            'requestReferenceNumber' => $event['requestReferenceNumber'] ?? $event['referenceNumber'] ?? '',
-            'totalAmount' => $event['totalAmount'] ?? [],
-        ], $payment, $checkoutId);
-}
-
-function maya_checkout_id_matches(array $checkout, array $payment, string $requestedCheckoutId): bool
-{
-    $savedCheckoutId = (string) ($payment['maya_checkout_id'] ?? '');
-    return $savedCheckoutId !== ''
-        && $requestedCheckoutId !== ''
-        && hash_equals($savedCheckoutId, $requestedCheckoutId)
-        && (!isset($checkout['checkoutId']) || (
-            is_string($checkout['checkoutId'])
-            && hash_equals($savedCheckoutId, $checkout['checkoutId'])
-        ));
-}
-
-function maya_manual_mark_allowed(array $payment): bool
-{
-    return ($payment['payment_status'] ?? null) !== 'Paid'
-        && ($payment['payment_method'] ?? null) !== 'Maya'
-        && (string) ($payment['maya_checkout_id'] ?? '') === '';
-}
-
-function maya_amount_in_cents(mixed $amount): ?int
-{
-    if (!is_string($amount) && !is_int($amount) && !is_float($amount)) {
-        return null;
-    }
-    $value = (string) $amount;
-    if (!preg_match('/^(0|[1-9]\d*)(?:\.(\d+))?$/', $value, $matches)) {
-        return null;
-    }
-
-    $whole = (int) $matches[1];
-    $fraction = $matches[2] ?? '';
-    if (strlen($fraction) > 2 && trim(substr($fraction, 2), '0') !== '') {
-        return null;
-    }
-    $fraction = str_pad(substr($fraction, 0, 2), 2, '0');
-    $fractionCents = (int) $fraction;
-    if ($whole > intdiv(PHP_INT_MAX - $fractionCents, 100)) {
-        return null;
-    }
-    return $whole * 100 + $fractionCents;
-}
-
-function maya_webhook_valid(string $body, string $signature): bool
-{
-    $secret = getenv('MAYA_WEBHOOK_SECRET');
-    return is_string($secret) && $secret !== '' && $signature !== ''
-        && hash_equals(hash_hmac('sha256', $body, $secret), $signature);
+$previousSecret = getenv('MAYA_WEBHOOK_SECRET');
+putenv('MAYA_WEBHOOK_SECRET=maya-test-secret');
+$body = '{"event":"test"}';
+$validSignature = hash_hmac('sha256', $body, 'maya-test-secret');
+check_maya_test('valid webhook signature is accepted', maya_webhook_valid($body, $validSignature));
+check_maya_test('invalid webhook signature is rejected', !maya_webhook_valid($body, 'invalid'));
+if ($previousSecret === false) {
+    putenv('MAYA_WEBHOOK_SECRET');
+} else {
+    putenv('MAYA_WEBHOOK_SECRET=' . $previousSecret);
 }
