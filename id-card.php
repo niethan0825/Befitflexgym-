@@ -1,0 +1,117 @@
+<?php
+define('IN_SUBDIR', true);
+require __DIR__ . '/../includes/auth.php';
+$u = require_role('member');
+$mid = $_SESSION['member_id'] ?? '';
+
+$page = 'idcard';
+$bodyClass = 'member-id-card';
+$title = 'My Member Card';
+$subtitle = 'Show this at the desk, or use the number at the check-in station.';
+
+$me = row(
+  "SELECT m.*,
+      (SELECT p.payment_status FROM payments p
+         WHERE p.member_id = m.member_id
+         ORDER BY p.created_at DESC, p.payment_id DESC LIMIT 1) latest_payment_status,
+      (SELECT p.updated_at FROM payments p
+         WHERE p.member_id = m.member_id
+         ORDER BY p.created_at DESC, p.payment_id DESC LIMIT 1) latest_payment_updated_at
+     FROM members m WHERE m.member_id = ?",
+  [$mid]
+);
+$dayPass = $me ? row(
+  "SELECT pass_id, visit_date FROM day_passes
+    WHERE member_id = ? AND visit_date >= CURDATE() AND pass_status = 'Paid'
+    ORDER BY visit_date, created_at DESC, pass_id DESC LIMIT 1",
+  [$mid]
+) : null;
+$monthlyQrAvailable = $me && $me['status'] === 'Active' && $me['latest_payment_status'] === 'Paid';
+$usingDayPassQr = !$monthlyQrAvailable && $dayPass !== null;
+$qrAvailable = $monthlyQrAvailable || $dayPass !== null;
+
+$hasLogo = is_file(__DIR__ . '/../assets/img/logo.png');
+$b = base_url();
+
+include __DIR__ . '/../includes/header.php';
+?>
+
+<div class="grid c2 idcard-page">
+  <div class="panel glass idcard-panel">
+    <h2><i class="fa-solid fa-id-card"></i> Your card
+      <span class="spacer"></span>
+      <button class="btn sm" onclick="window.print()"><i class="fa-solid fa-print"></i> Print</button>
+    </h2>
+
+    <div class="idcard-stage">
+      <div class="idcard">
+        <div class="brandline">
+          <?php if ($hasLogo): ?><img src="<?= $b ?>assets/img/logo.png" alt="">
+          <?php else: ?><svg viewBox="0 0 100 100" fill="none"><path d="M50 4 92 28v48L50 100 8 76V28z" stroke="#E53935" stroke-width="6"/><path d="M34 30h26M34 50h22M34 70h26" stroke="#E53935" stroke-width="7" stroke-linecap="round"/></svg><?php endif; ?>
+          <div><b>BE FIT FLEX GYM</b><span>Laguna</span></div>
+        </div>
+
+        <div class="who"><?= e($me['member_name']) ?></div>
+        <div class="mid" data-copy="<?= e($me['member_id']) ?>"><?= e($me['member_id']) ?></div>
+
+        <div class="rowline">
+          <div><?= $usingDayPassQr ? 'ACCESS' : 'MEMBERSHIP' ?><b><?= $usingDayPassQr ? 'Day Pass' : e($me['membership_type']) ?></b></div>
+          <div><?= $usingDayPassQr ? 'VISIT DATE' : 'SINCE' ?><b><?= $usingDayPassQr ? dt($dayPass['visit_date'], 'M j, Y') : dt($me['join_date'], 'M Y') ?></b></div>
+          <div><?= $usingDayPassQr ? 'PASS STATUS' : 'STATUS' ?><b><?= $usingDayPassQr ? 'Paid' : e($me['status']) ?></b></div>
+        </div>
+
+        <div class="idcard-qr-frame">
+          <?php if ($qrAvailable): ?>
+            <img
+              src="<?= $b ?>api/qr.php?type=member&amp;id=<?= rawurlencode((string) $mid) ?>&amp;v=<?= rawurlencode((string) ($me['latest_payment_updated_at'] ?? '') . '|' . ($dayPass['pass_id'] ?? '')) ?>"
+              alt="Member check-in QR code"
+              width="120"
+              height="120"
+              onerror="this.hidden=true;this.nextElementSibling.hidden=false"
+            >
+            <span class="qr-load-error" role="status" hidden>QR code could not be loaded. Refresh the page or show your member number at the front desk.</span>
+          <?php else: ?>
+            <span style="font-size:11px;color:#333;text-align:center">QR available with an active paid membership or an upcoming paid day pass</span>
+          <?php endif; ?>
+        </div>
+      </div>
+    </div>
+
+    <p class="note" style="text-align:center;margin-top:16px">
+      Show this QR code to the gym's check-in scanner. Access requires an active paid membership or a valid paid day pass.
+    </p>
+  </div>
+
+  <div class="panel glass">
+    <h2><i class="fa-solid fa-circle-info"></i> Using the gym</h2>
+
+    <table class="kv" style="width:100%">
+      <tr><th>Member number</th><td class="mono"><?= e($me['member_id']) ?></td></tr>
+      <tr><th>Plan</th><td><?= e($me['membership_type']) ?></td></tr>
+      <tr><th>Status</th><td><?= badge($me['status']) ?></td></tr>
+      <tr><th>Member since</th><td><?= dt($me['join_date']) ?></td></tr>
+    </table>
+
+    <h2 style="margin-top:26px"><i class="fa-solid fa-location-dot"></i> Branches</h2>
+    <?php foreach (rows('SELECT * FROM gyms ORDER BY gym_id') as $g): ?>
+      <div class="mini-row">
+        <span><b><?= e($g['gym_branch']) ?></b><div class="note"><?= e($g['location']) ?></div></span>
+        <span class="mono"><?= e($g['contact_number']) ?></span>
+      </div>
+    <?php endforeach; ?>
+
+    <p class="note" style="margin-top:18px">
+      Bring the card, or just your member number. If you lose access to your
+      account, the front desk can look you up by name.
+    </p>
+    <div class="mini-row">
+      <span><b>Need a day pass?</b><div class="note">Scan this QR to purchase a one-day visit or open the day-pass page.</div></span>
+      <span>
+        <img src="<?= $b ?>api/qr.php?type=day_pass_purchase" alt="Scan to purchase a day pass" width="96" height="96">
+        <a class="btn sm" href="<?= $b ?>day-pass.php">Get a day pass</a>
+      </span>
+    </div>
+  </div>
+</div>
+
+<?php include __DIR__ . '/../includes/footer.php'; ?>
